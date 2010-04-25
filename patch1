@@ -1,0 +1,109 @@
+diff -uN UVCVIDEO_v0.1.0/uvc_video.c UVCVIDEO_patched/uvc_video.c
+--- UVCVIDEO_v0.1.0/uvc_video.c	2008-06-26 10:41:01.000000000 +0200
++++ UVCVIDEO_patched/uvc_video.c	2008-06-27 12:09:20.000000000 +0200
+@@ -371,23 +371,105 @@
+ 	return data[0];
+ }
+ 
++/* This patch should work ONLY with YUY2 image formats, also known as YUYV or
++ * YUV422 formats.
++ * This patched function allows to overturn video images from an upside-down
++ * orientation to a normal one. The conversion consists in copying 4 bytes at a
++ * time (Y0,U0,Y1,V0) corresponding to 2 pixels, in a bottom-up direction, from
++ * the frame (coming from the video source) to the buffer that will be used by
++ * the application requesting the video stream. But in order to satisfy the YUY2
++ * image format byte has to be copied in this way: Y1 U0 Y0 VO.
++ * This patch performs its job just once for each frame and only when current
++ * frame is completed, but each time it is required to allocate memory in order
++ * to store a copy of that frame.
++ */
+ static void uvc_video_decode_data(struct uvc_video_device *video,
+ 		struct uvc_buffer *buf, const __u8 *data, int len)
+ {
+ 	struct uvc_video_queue *queue = &video->queue;
+ 	unsigned int maxlen, nbytes;
+ 	void *mem;
++	/* Patch variables */
++	__u8 *mem_tmp, *ptr_tmp;
++	int i, k, pixel_size;
+ 
+ 	if (len <= 0)
+ 		return;
+ 
+ 	/* Copy the video data to the buffer. */
++	/* How many bytes are needed to complete the buffer? */
+ 	maxlen = buf->buf.length - buf->buf.bytesused;
++	/* Where do pixels stored in "data" have to be copied? */
+ 	mem = queue->mem + buf->buf.m.offset + buf->buf.bytesused;
++	/* How many bytes really can be copied into "mem"? */
+ 	nbytes = min((unsigned int)len, maxlen);
++	/* "nbytes" are copied from "data" to "mem" buffer.
++	 * "data" stores a sequence of pixels coming from the video source.
++	 * This sequence is not a full frame or a full  row of pixel, but just
++	 * an ordered vector of pixels (from top-left to bottom-right), whose
++	 * represents just an area of the current frame.
++	 * This function has to be called hundreds of times before a frame is
++	 * completed and "nbytes" is not constant! Each time "data" contains the
++	 * next part of the frame. At the end data stored in "mem" buffer will
++	 * be used by the application who requested the video stream.
++	 */
+ 	memcpy(mem, data, nbytes);
+ 	buf->buf.bytesused += nbytes;
+ 
++	/* Have the last copied bytes completed the current frame? */
++	if (nbytes == maxlen) {
++		/* Area where to save the original frame before manipulation. */
++		mem_tmp = (__u8 *) kmalloc(buf->buf.bytesused / 2, GFP_ATOMIC);
++		if (mem_tmp != NULL ) {
++			/* Copy the original frame in a temporary buffer. */
++			memcpy(mem_tmp, queue->mem + buf->buf.m.offset,
++			       buf->buf.bytesused / 2);
++			/* "pixel_size" depens on the pixel color depth (bpp),
++			 * but in YUY2 image format is constant and equal to 2.
++			 */
++		 	pixel_size = video->streaming->format->bpp / 8;
++			/* The following loop copy 2 pixels at a time (4 bytes
++			 * in YUY2 format) from the last two stored in "mem"
++			 * (and going back) to the first two (and going on)
++			 * stored in "mem" itself following a sort of YUY2
++			 * algorithm.
++			 */
++			ptr_tmp = queue->mem + buf->buf.m.offset
++				  + buf->buf.bytesused / 2;
++			/* When the top-half of the frame has been reversed,
++			 * rows are copied from the last one stored in "mem_tmp"
++			 * (and going up) into the bottom half part of "mem"
++			 * buffer.
++			 */
++			for (i = 0, k = buf->buf.bytesused / 2 - 2 * pixel_size;
++			     i < buf->buf.bytesused;
++			     i += 2 * pixel_size, k -= 2 * pixel_size){
++				/* If the top-half of the frame has been
++				 * revesed, then it is needed to split the
++				 * source buffer from "mem" to "mem_tmp".
++				 */
++				if (i == buf->buf.bytesused / 2) {
++					ptr_tmp = mem_tmp;
++					k = buf->buf.bytesused / 2
++					    - 2 * pixel_size;
++				}
++			     /* The order of copied bytes is changed from
++			      * (Y0 U0 Y1 V1) to (Y1 U0 Y0 V1), i.e. from
++			      * (#0 #1 #2 #3) to (#2 #1 #0 #3).
++			      */
++			     ((__u8 *)(queue->mem+buf->buf.m.offset + i))[0] =
++			     ((__u8 *)(ptr_tmp + k))[2];
++			     ((__u8 *)(queue->mem+buf->buf.m.offset + i))[1] =
++			     ((__u8 *)(ptr_tmp + k))[1];
++			     ((__u8 *)(queue->mem+buf->buf.m.offset + i))[2] =
++			     ((__u8 *)(ptr_tmp + k))[0];
++			     ((__u8 *)(queue->mem+buf->buf.m.offset + i))[3] =
++			     ((__u8 *)(ptr_tmp + k))[3];
++			}
++			/* For this frame "mem_tmp" is not needed any more. */
++			kfree(mem_tmp);
++		}
++	}
+ 	/* Complete the current frame if the buffer size was exceeded. */
+ 	if (len > maxlen) {
+ 		uvc_trace(UVC_TRACE_FRAME, "Frame complete (overflow).\n");

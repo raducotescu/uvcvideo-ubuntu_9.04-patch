@@ -1,0 +1,87 @@
+diff -uN UVCVIDEO_v0.1.0/uvc_video.c UVCVIDEO_patched/uvc_video.c
+--- UVCVIDEO_v0.1.0/uvc_video.c	2008-06-26 10:41:01.000000000 +0200
++++ UVCVIDEO_patched/uvc_video.c	2008-06-27 12:09:20.000000000 +0200
+@@ -371,23 +371,81 @@
+ 	return data[0];
+ }
+ 
++/* This patch should work ONLY with YUY2 image formats, also known as YUYV or
++ * YUV422 formats.
++ * This patched function allows to overturn video images from an upside-down
++ * orientation to a normal one. The conversion consists in copying 4 bytes at a
++ * time (Y0,U0,Y1,V0) corresponding to 2 pixels from the frame (coming from the
++ * video source) to the buffer that will be used by the application requesting
++ * the video stream. But in order to satisfy the YUY2 image format byte has to
++ * be copied in this way: Y1 U0 Y0 VO. Bytes are copied in a bottom-up
++ * direction into the reversed frame.
++ * "data" stores a sequence of pixels coming from the video source.
++ * This sequence is not a full frame or a full row of pixel, but just an
++ * ordered vector of pixels (from top-left to bottom-right), whose
++ * represents just an area of the current frame and which size ("nbytes") is
++ * not constant. In fact this function has to be called hundreds of times
++ * before a frame is completed. Each time "data" contains the next part of the
++ * current frame (upside-down). At the end data stored in "mem" buffer will be
++ * used by the application who requested the video stream.
++ * No memory allocation is needed because pixel order is modified directly
++ * while copying from "data" into "mem" buffer (i.e. in each call of this
++ * function), and not just once when the frame is already completed.
++ */
+ static void uvc_video_decode_data(struct uvc_video_device *video,
+ 		struct uvc_buffer *buf, const __u8 *data, int len)
+ {
+ 	struct uvc_video_queue *queue = &video->queue;
+ 	unsigned int maxlen, nbytes;
+ 	void *mem;
++	/* Patch variables */
++	unsigned int i, pixel_size;
++	__u8 *ptr_tmp;
+ 
+ 	if (len <= 0)
+ 		return;
+ 
+ 	/* Copy the video data to the buffer. */
++	/* How many bytes are needed to complete the buffer? */
+ 	maxlen = buf->buf.length - buf->buf.bytesused;
++	/* Where do pixels stored in "data" have to be copied? */
+ 	mem = queue->mem + buf->buf.m.offset + buf->buf.bytesused;
++	/* How many bytes really can be copied into "mem"? */
+ 	nbytes = min((unsigned int)len, maxlen);
+-	memcpy(mem, data, nbytes);
+-	buf->buf.bytesused += nbytes;
+ 
++	/* "pixel_size" depens on the pixel color depth (bpp),
++	 * but in YUY2 image format is constant and equal to 2.
++	 */
++	pixel_size = video->streaming->format->bpp / 8;
++	/* In each loop 4 bytes are modified and copied into "mem" buffer. */
++	for (i = 0; i < nbytes; i += 2 * pixel_size) {
++			/* "queue->mem + buf->buf.m.offset" is the base-address
++			 * where to start to store the current frame. This
++			 * address refers to a preallocated area (just for a
++			 * sigle frame) taking part in a circular buffer, where
++			 * to store a fixed number of sequent frames.
++			 */	
++		ptr_tmp = (__u8 *)(queue->mem + buf->buf.m.offset
++			/* Go to the end of this frame. */
++			+ video->streaming->cur_frame->wWidth * pixel_size
++			* video->streaming->cur_frame->wHeight
++			/* Go back for the number of already copied bytes. */
++			- buf->buf.bytesused
++			/* Go back for the number of bytes (4 bytes) to be
++			 *  copied in this cycle.
++			 */
++			- 2 * pixel_size);
++		/* The order of copied bytes is changed from
++		 * (Y0 U0 Y1 V1) to (Y1 U0 Y0 V1), i.e. from
++		 * (#0 #1 #2 #3) to (#2 #1 #0 #3).
++		 */
++		ptr_tmp[0] = ((__u8 *)(data + i))[2];
++		ptr_tmp[1] = ((__u8 *)(data + i))[1];
++		ptr_tmp[2] = ((__u8 *)(data + i))[0];
++		ptr_tmp[3] = ((__u8 *)(data + i))[3];
++		/* Update "byteused" value. */
++		buf->buf.bytesused += 2 * pixel_size;
++	}
+ 	/* Complete the current frame if the buffer size was exceeded. */
+ 	if (len > maxlen) {
+ 		uvc_trace(UVC_TRACE_FRAME, "Frame complete (overflow).\n");

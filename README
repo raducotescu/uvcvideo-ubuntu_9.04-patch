@@ -1,0 +1,18 @@
+This script provides installation for uvcvideo driver in Ubuntu. It should  
+be used if the images acquired through your webcam are flipped vertically.  
+The script comes with no warranties of any kind.
+
+Note that a better and more elegant solution is available at:
+http://radu.cotescu.com/2009/11/05/flipped-images-ubuntu-webcam/                          
+                                                                            
+Instructions:
+================================================================================
+Run the script with superuser privileges using the options in the Usage section.
+                                                                             
+Usage:
+================================================================================
+./flip_webcam {OPTION}                                               
+        1              this applies patch1 file                              
+        2              this applies patch2 file                              
+       -h, --help      displays this beautiful help section                  
+
